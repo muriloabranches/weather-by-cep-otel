@@ -1,6 +1,6 @@
 # Weather by CEP (OTel)
 
-Este projeto é um servidor HTTP em Go que fornece informações de temperatura com base no CEP fornecido utilizando OpenTelemetry
+Este projeto é um servidor HTTP em Go que fornece informações de temperatura com base no CEP fornecido utilizando OpenTelemetry e Zipkin
 
 ## Pré-requisitos
 
@@ -63,3 +63,6 @@ curl -X POST http://localhost:8080 -H "Content-Type: application/json" -d '{"cep
   "temp_K": 298.0
 }
 ```
+
+## Zipkin
+- O servidor do Zipkin estará disponível em: http://localhost:9411
