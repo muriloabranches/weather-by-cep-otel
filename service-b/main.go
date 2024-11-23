@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,10 +12,24 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/zipkin"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
+)
+
+const (
+	SERVICE_NAME = "service-b"
+	ZIPKIN_URL   = "http://zipkin:9411/api/v2/spans"
 )
 
 func main() {
 	log.Println("Starting server...")
+
+	initZipkin()
 
 	http.HandleFunc("/cep/", handleCEPRequest)
 
@@ -25,7 +40,28 @@ func main() {
 	}
 }
 
+func initZipkin() {
+	exporter, err := zipkin.New(ZIPKIN_URL)
+	if err != nil {
+		log.Fatalf("Could not create zipkin exporter: %s", err.Error())
+	}
+	tp := trace.NewTracerProvider(
+		trace.WithSampler(trace.AlwaysSample()),
+		trace.WithBatcher(exporter),
+		trace.WithResource(resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceNameKey.String(SERVICE_NAME))),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+}
+
 func handleCEPRequest(w http.ResponseWriter, r *http.Request) {
+	carrier := propagation.HeaderCarrier(r.Header)
+	ctx := r.Context()
+	ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
+
+	ctx, span := otel.Tracer(SERVICE_NAME).Start(ctx, "handleCEPRequest")
+	defer span.End()
+
 	log.Printf("Request: %s %s", r.Method, r.URL.Path)
 
 	if r.Method != http.MethodGet {
@@ -41,14 +77,14 @@ func handleCEPRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	location, err := fetchLocation(cep)
+	location, err := fetchLocation(ctx, cep)
 	if err != nil {
 		log.Printf("Can not find zipcode: %s", cep)
 		http.Error(w, "can not find zipcode", http.StatusNotFound)
 		return
 	}
 
-	temperature, err := fetchTemperature(location)
+	temperature, err := fetchTemperature(ctx, location)
 	if err != nil {
 		log.Printf("Can not find temperature for location: %s", location)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -90,7 +126,10 @@ func round(value float64) float64 {
 	return math.Round(value*10) / 10
 }
 
-func fetchLocation(cep string) (string, error) {
+func fetchLocation(ctx context.Context, cep string) (string, error) {
+	_, span := otel.Tracer(SERVICE_NAME).Start(ctx, "fetchLocation")
+	defer span.End()
+
 	url := fmt.Sprintf("https://viacep.com.br/ws/%s/json/", cep)
 	resp, err := http.Get(url)
 	if err != nil {
@@ -115,7 +154,10 @@ func fetchLocation(cep string) (string, error) {
 	return data.Location, nil
 }
 
-func fetchTemperature(location string) (float64, error) {
+func fetchTemperature(ctx context.Context, location string) (float64, error) {
+	_, span := otel.Tracer(SERVICE_NAME).Start(ctx, "fetchTemperature")
+	defer span.End()
+
 	apiKey := os.Getenv("WEATHERAPI_KEY")
 	if apiKey == "" {
 		return 0, errors.New("missing WEATHERAPI_KEY")

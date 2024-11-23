@@ -1,16 +1,31 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"regexp"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/zipkin"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+)
+
+const (
+	SERVICE_NAME    = "service-a"
+	ZIPKIN_URL      = "http://zipkin:9411/api/v2/spans"
+	CEP_SERVICE_URL = "http://service-b:8081"
 )
 
 func main() {
 	log.Println("Starting server...")
+
+	initZipkin()
 
 	http.HandleFunc("/", handleRequest)
 
@@ -21,7 +36,28 @@ func main() {
 	}
 }
 
+func initZipkin() {
+	exporter, err := zipkin.New(ZIPKIN_URL)
+	if err != nil {
+		log.Fatalf("Could not create zipkin exporter: %s", err.Error())
+	}
+	tp := trace.NewTracerProvider(
+		trace.WithSampler(trace.AlwaysSample()),
+		trace.WithBatcher(exporter),
+		trace.WithResource(resource.NewWithAttributes(semconv.SchemaURL, semconv.ServiceNameKey.String(SERVICE_NAME))),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+}
+
 func handleRequest(w http.ResponseWriter, r *http.Request) {
+	carrier := propagation.HeaderCarrier(r.Header)
+	ctx := r.Context()
+	ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
+
+	ctx, span := otel.Tracer(SERVICE_NAME).Start(ctx, "handleCEPRequest")
+	defer span.End()
+
 	log.Printf("Request: %s %s", r.Method, r.URL.Path)
 
 	if r.Method != http.MethodPost {
@@ -53,7 +89,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := fetchTemperatureByCEP(cep)
+	response, err := fetchTemperatureByCEP(ctx, cep)
 	if err != nil {
 		log.Print(err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -79,9 +115,18 @@ type Response struct {
 	TempK float64 `json:"temp_K"`
 }
 
-func fetchTemperatureByCEP(cep string) (*Response, error) {
-	url := fmt.Sprintf("http://service-b:8081/cep/%s", cep)
-	resp, err := http.Get(url)
+func fetchTemperatureByCEP(ctx context.Context, cep string) (*Response, error) {
+	_, span := otel.Tracer(SERVICE_NAME).Start(ctx, "fetchTemperatureByCEP")
+	defer span.End()
+
+	url := CEP_SERVICE_URL + "/cep/" + cep
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
